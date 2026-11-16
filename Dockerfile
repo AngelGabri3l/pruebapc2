@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 # Actualizar parches de seguridad del SO base (soluciona CVE en zlib1g)
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
