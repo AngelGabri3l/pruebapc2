@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+# Actualizar parches de seguridad del SO base (soluciona CVE en zlib1g)
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
