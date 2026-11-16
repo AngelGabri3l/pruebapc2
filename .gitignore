@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+gha_deploy
+gha_deploy.pub
