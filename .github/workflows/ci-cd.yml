@@ -122,6 +122,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy (falla si hay CRITICAL/HIGH con parche disponible)
+        # Fijada por SHA (v0.36.0). Aqua migró los tags a prefijo 'v' tras un ataque a su cadena de suministro.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.vars.outputs.image }}:${{ github.sha }}
@@ -175,10 +176,19 @@ jobs:
           OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
           OCI_KNOWN_HOSTS: ${{ secrets.OCI_KNOWN_HOSTS }}
         run: |
+          for v in OCI_HOST OCI_USER OCI_SSH_KEY OCI_KNOWN_HOSTS; do
+            [ -n "${!v}" ] || { echo "::error::El secret $v está vacío o no existe (revisa nombre exacto y que esté en el Environment 'production' o en Repository secrets)"; exit 1; }
+          done
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$OCI_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$OCI_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # tr -d '\r' quita saltos de línea de Windows (si no, la llave puede fallar al leerse)
+          printf '%s\n' "$OCI_SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$OCI_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+          # Funciona con cualquier tipo de llave (RSA de Oracle, ed25519, etc.)
+          printf 'Host *\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null \
+            || { echo "::error::OCI_SSH_KEY no es una llave privada válida. Pega el archivo completo (con BEGIN/END), en formato PEM de Oracle, no .ppk"; exit 1; }
 
       - name: Actualizar código en la VM (git) y generar .env
         env:
@@ -188,6 +198,8 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
+          ssh -o ConnectTimeout=15 "$OCI_USER@$OCI_HOST" 'echo conexion_ssh_ok' \
+            || { echo "::error::Falló la conexión SSH (host key, usuario, llave o puerto 22). Revisa OCI_KNOWN_HOSTS, OCI_SSH_KEY, OCI_USER y OCI_HOST"; exit 1; }
           ssh "$OCI_USER@$OCI_HOST" "test -d '$APP_DIR' && test -w '$APP_DIR'" \
             || { echo "::error::$APP_DIR no existe o no es escribible por $OCI_USER en la VM (ver README, paso 2)"; exit 1; }
           # Primer deploy: clona. Siguientes: fetch + dejar el árbol exactamente en el commit que pasó el pipeline.
@@ -204,8 +216,12 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | ssh "$OCI_USER@$OCI_HOST" "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
           ssh "$OCI_USER@$OCI_HOST" "cd '$APP_DIR' && docker compose pull web && docker compose up -d --no-build --remove-orphans && docker image prune -f"
 
-      - name: Smoke test
-        run: curl -fsS --retry 12 --retry-delay 5 --retry-connrefused "http://$OCI_HOST/health"
+      - name: Smoke test (a través del balanceador)
+        env:
+          LB_HOST: ${{ secrets.LB_HOST }}
+        run: |
+          [ -n "$LB_HOST" ] || { echo "::error::Falta el secret LB_HOST (IP pública del balanceador)"; exit 1; }
+          curl -fsS --retry 12 --retry-delay 5 --retry-connrefused "http://$LB_HOST/health"
 
   # 6) DAST opcional: OWASP ZAP contra la app ya desplegada (no bloquea)
   dast:
@@ -217,10 +233,10 @@ jobs:
     steps:
       - uses: zaproxy/action-baseline@v0.12.0
         # La action sube su reporte con una API de artifacts retirada por GitHub y falla al final.
-        # El escaneo sí corre; por eso se ignora ese fallo y el reporte se sube abajo.
+        # El escaneo sí corre; por eso se ignora ese fallo y el reporte se sube abajo con upload-artifact@v4.
         continue-on-error: true
         with:
-          target: http://${{ secrets.OCI_HOST }}
+          target: http://${{ secrets.LB_HOST }}
           allow_issue_writing: false
           fail_action: false
 
